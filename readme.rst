@@ -59,13 +59,19 @@ Output Type
 User Configuration Script
    User configuration is just a Python script which can be used to manipulate text using Python's full feature set.
 
+Suspend/Resume
+   Initial load time can be an issue for users on slower systems or with some of the larger language-models,
+   in this case suspend/resume can be useful.
+   While suspended all data is kept in memory and the process is stopped.
+   Audio recording is stopped and restarted on resume.
+
 See ``nerd-dictation begin --help`` for details on how to access these options.
 
 
 Dependencies
 ============
 
-- Python 3.
+- Python 3.6 (or newer).
 - The VOSK-API.
 - An audio recording utility (``parec`` by default).
 - An input simulation utility (``xdotool`` by default).
@@ -78,6 +84,7 @@ You may select one of the following tools.
 
 - ``parec`` command for recording from pulse-audio.
 - ``sox`` command as alternative, see the guide: `Using sox with nerd-dictation <readme-sox.rst>`_.
+- ``pw-cat`` command for recording from pipewire.
 
 
 Input Simulation Utilities
@@ -180,12 +187,14 @@ While it could use any system currently it uses the VOSK-API.
 
 positional arguments:
 
-    :begin:             Begin dictation.
-    :end:               End dictation.
-    :cancel:            Cancel dictation.
+    :begin:               Begin dictation.
+    :end:                 End dictation.
+    :cancel:              Cancel dictation.
+    :suspend:             Suspend the dictation process.
+    :resume:              Resume the dictation process.
 
 options:
-  -h, --help          show this help message and exit
+  -h, --help            show this help message and exit
 
 Subcommand: ``begin``
 ---------------------
@@ -193,17 +202,19 @@ Subcommand: ``begin``
 usage::
 
        nerd-dictation begin [-h] [--cookie FILE_PATH] [--config FILE]
-                            [--vosk-model-dir DIR]
+                            [--vosk-model-dir DIR] [--vosk-grammar-file DIR]
                             [--pulse-device-name IDENTIFIER]
                             [--sample-rate HZ] [--defer-output] [--continuous]
                             [--timeout SECONDS] [--idle-time SECONDS]
-                            [--delay-exit SECONDS]
+                            [--delay-exit SECONDS] [--suspend-on-start]
                             [--punctuate-from-previous-timeout SECONDS]
                             [--full-sentence] [--numbers-as-digits]
-                            [--numbers-use-separator] [--input INPUT_METHOD]
+                            [--numbers-use-separator]
+                            [--numbers-min-value NUMBERS_MIN_VALUE]
+                            [--numbers-no-suffix] [--input INPUT_METHOD]
                             [--output OUTPUT_METHOD]
                             [--simulate-input-tool SIMULATE_INPUT_TOOL]
-                            [- ...]
+                            [--verbose VERBOSE] [- ...]
 
 This creates the directory used to store internal data, so other commands such as sync can be performed.
 
@@ -213,6 +224,10 @@ options:
   --config FILE         Override the file used for the user configuration.
                         Use an empty string to prevent the users configuration being read.
   --vosk-model-dir DIR  Path to the VOSK model, see: https://alphacephei.com/vosk/models
+  --vosk-grammar-file DIR
+                        Path to a JSON grammar file.  This restricts the phrases recognized by VOSK for
+                        better accuracy.  See `vosk_recognizer_new_grm` in the API reference:
+                        https://github.com/alphacep/vosk-api/blob/master/src/vosk_api.h
   --pulse-device-name IDENTIFIER
                         The name of the pulse-audio device to use for recording.
                         See the output of "pactl list sources" to find device names (using the identifier following "Name:").
@@ -230,9 +245,12 @@ options:
                         Setting to zero is the most responsive at the cost of high CPU usage.
                         The default value is 0.1 (processing 10 times a second), which is quite responsive in practice
                         (the maximum value is clamped to 0.5)
-  --delay-exit SECONDS  The time to continue running after an exit request.
+  --delay-exit SECONDS  The time to continue running after an end request.
                         this can be useful so "push to talk" setups can be released while you finish speaking
                         (zero disables).
+  --suspend-on-start    Start the process and immediately suspend.
+                        Intended for use when nerd-dictation is kept open
+                        where resume/suspend is used for dictation instead of begin/end.
   --punctuate-from-previous-timeout SECONDS
                         The time-out in seconds for detecting the state of dictation from the previous recording,
                         this can be useful so punctuation it is added before entering the dictation(zero disables).
@@ -242,12 +260,19 @@ options:
   --numbers-as-digits   Convert numbers into digits instead of using whole words.
   --numbers-use-separator
                         Use a comma separators for numbers.
-  --input INPUT_METHOD  Specify input method to be used for audio recording. Valid methods: PAREC, SOX
+  --numbers-min-value NUMBERS_MIN_VALUE
+                        Minimum value for numbers to convert from whole words to digits.
+                        This provides for more formal writing and prevents terms like "no one"
+                        from being turned into "no 1".
+  --numbers-no-suffix   Suppress number suffixes when --numbers-as-digits is specified.
+                        For example, this will prevent "first" from becoming "1st".
+  --input INPUT_METHOD  Specify input method to be used for audio recording. Valid methods: PAREC, SOX, PW-CAT.
 
                         - ``PAREC`` (external command, default)
                           See --pulse-device-name option to use a specific pulse-audio device.
                         - ``SOX`` (external command)
                           For help on setting up sox, see ``readme-sox.rst`` in the nerd-dictation repository.
+                        - ``PW-CAT`` (external command)
   --output OUTPUT_METHOD
                         Method used to at put the result of speech to text.
 
@@ -260,9 +285,15 @@ options:
 
                         - ``XDOTOOL`` Compatible with the X server only (default).
                         - ``DOTOOL`` Compatible with all Linux distributions and Wayland.
+                        - ``DOTOOLC`` Same as DOTOOL but for use with the `dotoold` daemon.
                         - ``YDOTOOL`` Compatible with all Linux distributions and Wayland but requires some setup.
                         - ``WTYPE`` Compatible with Wayland.
+                        - ``STDOUT`` Bare stdout with Ctrl-H for backspaces.
                           For help on setting up ydotool, see ``readme-ydotool.rst`` in the nerd-dictation repository.
+  --verbose VERBOSE     Verbosity level, defaults to zero (no output except for errors)
+
+                        - Level 1: report top level actions (dictation started, suspended .. etc).
+                        - Level 2: report internal details (may be noisy).
   ``-`` ...             End argument parsing.
                         This can be used for user defined arguments which configuration scripts may read from the ``sys.argv``.
 
@@ -288,6 +319,38 @@ usage::
        nerd-dictation cancel [-h] [--cookie FILE_PATH]
 
 This cancels dictation.
+
+options:
+  -h, --help          show this help message and exit
+  --cookie FILE_PATH  Location for writing a temporary cookie (this file is monitored to begin/end dictation).
+
+Subcommand: ``suspend``
+-----------------------
+
+usage::
+
+       nerd-dictation suspend [-h] [--cookie FILE_PATH]
+
+Suspend recording audio & the dictation process.
+
+This is useful on slower systems or when large language models take longer to load.
+Recording audio is stopped and the process is paused to remove any CPU overhead.
+
+options:
+  -h, --help          show this help message and exit
+  --cookie FILE_PATH  Location for writing a temporary cookie (this file is monitored to begin/end dictation).
+
+Subcommand: ``resume``
+----------------------
+
+usage::
+
+       nerd-dictation resume [-h] [--cookie FILE_PATH]
+
+Resume recording audio & the dictation process.
+
+This is to be used to resume after the 'suspend' command.
+When nerd-dictation is not suspended, this does nothing.
 
 options:
   -h, --help          show this help message and exit

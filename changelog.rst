@@ -3,6 +3,10 @@
 Changelog
 #########
 
+- 2023/02/09: Add ``--vosk-grammar-file`` allowing a restricted set of words.
+- 2023/02/09: Use ``SIGHUB`` to reload the user configuration at run-time.
+- 2023/02/02: Add ``--suspend-on-start`` argument to the ``begin`` sub-command.
+- 2023/02/02: Add ``suspend`` & ``resume`` sub-commands for process level suspend/resume.
 - 2022/11/03: Add ``dotool`` support with ``--simpulate-input-tool=DOTOOL``.
 - 2022/06/05: Add packaging script for PIP/setup-tools to optionally install via PIP.
 - 2022/05/16: Add ``ydotool`` support with ``--simpulate-input-tool=YDOTOOL``.

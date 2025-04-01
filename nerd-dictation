@@ -55,11 +55,12 @@ def run_command_or_exit_on_failure(cmd: List[str]) -> None:
         sys.exit(1)
 
 
-def touch(filepath: str, mtime: Optional[float] = None) -> None:
+def touch(filepath: str, mtime: Optional[int] = None) -> None:
     if os.path.exists(filepath):
         os.utime(filepath, None if mtime is None else (mtime, mtime))
     else:
-        open(filepath, "ab").close()
+        with open(filepath, "ab") as _:
+            pass
         if mtime is not None:
             try:
                 os.utime(filepath, (mtime, mtime))
@@ -67,9 +68,10 @@ def touch(filepath: str, mtime: Optional[float] = None) -> None:
                 pass
 
 
-def file_mtime_or_none(filepath: str) -> Optional[float]:
+def file_mtime_or_none(filepath: str) -> Optional[int]:
     try:
-        return os.stat(filepath)[stat.ST_MTIME]
+        # For some reason `mypy` thinks this is a float.
+        return int(os.stat(filepath)[stat.ST_MTIME])
     except FileNotFoundError:
         return None
 
@@ -209,17 +211,27 @@ def simulate_typing_with_ydotool(delete_prev_chars: int, text: str) -> None:
 # -----------------------------------------------------------------------------
 # Simulate Input: DOTOOL
 #
-def simulate_typing_with_dotool(delete_prev_chars: int, text: str) -> None:
-    cmd = "dotool"
 
+# NOTE: typed as a string for Py3.6 compatibility.
+simulate_typing_with_dotool_proc: "Optional[subprocess.Popen[str]]" = None
+
+
+def simulate_typing_with_dotoolc(delete_prev_chars: int, text: str) -> None:
+    simulate_typing_with_dotool(delete_prev_chars, text, cmd="dotoolc")
+
+
+def simulate_typing_with_dotool(delete_prev_chars: int, text: str, cmd: str = "dotool") -> None:
     if delete_prev_chars == SIMULATE_INPUT_CODE_COMMAND:
         global simulate_typing_with_dotool_proc
         if text == "SETUP":
             # If this isn't true, something strange is going on.
             assert simulate_typing_with_dotool_proc is None
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True)
+            # "text" was added as a more readable alias for
+            # "universal_newlines" in Python 3.7 so use universal_newlines for
+            # Python 3.6 compatibility:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, universal_newlines=True)
             assert proc.stdin is not None
-            proc.stdin.write("keydelay 4\ntypedelay 12\n")
+            proc.stdin.write("keydelay 4\nkeyhold 0\ntypedelay 12\ntypehold 0\n")
             proc.stdin.flush()
             simulate_typing_with_dotool_proc = proc
         elif text == "TEARDOWN":
@@ -243,8 +255,6 @@ def simulate_typing_with_dotool(delete_prev_chars: int, text: str) -> None:
     proc.stdin.write("type " + text + "\n")
     proc.stdin.flush()
 
-
-simulate_typing_with_dotool_proc = None
 
 # -----------------------------------------------------------------------------
 # Simulate Input: WTYPE
@@ -275,6 +285,21 @@ def simulate_typing_with_wtype(delete_prev_chars: int, text: str) -> None:
 
 
 # -----------------------------------------------------------------------------
+# Simulate Input: STDOUT
+#
+def simulate_typing_with_stout(delete_prev_chars: int, text: str) -> None:
+    # No setup/tear-down.
+    if delete_prev_chars == SIMULATE_INPUT_CODE_COMMAND:
+        return
+
+    if delete_prev_chars:
+        sys.stdout.write("\x08" * delete_prev_chars)
+
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+# -----------------------------------------------------------------------------
 # Custom Configuration
 #
 
@@ -297,8 +322,8 @@ def calc_user_config_path(rest: Optional[str]) -> str:
 
 def user_config_as_module_or_none(
     config_override: Optional[str],
+    user_config_prev: Optional[ModuleType],
 ) -> Optional[ModuleType]:
-
     # Explicitly ask for no configuration.
     if config_override == "":
         return None
@@ -314,7 +339,13 @@ def user_config_as_module_or_none(
         user_config = execfile(user_config_path)
     except Exception as ex:
         sys.stderr.write('Failed to run "{:s}" with error: {:s}\n'.format(user_config_path, str(ex)))
-        sys.exit(1)
+        if user_config_prev is not None:
+            # Reloading configuration at run-time, don't exit in this case - use the previous config instead.
+            sys.stderr.write("Reload failed, continuing with previous configuration.\n")
+            user_config = user_config_prev
+        else:
+            # Exit if the user starts with an invalid configuration.
+            sys.exit(1)
 
     return user_config
 
@@ -325,10 +356,9 @@ def user_config_as_module_or_none(
 # Note this could be extracted into it's own small library.
 
 
-def from_words_to_digits_setup_once() -> Tuple[
-    Dict[str, Tuple[int, int, str, bool]], Set[str], Set[str], Set[str], Set[str]
-]:
-
+def from_words_to_digits_setup_once() -> (
+    Tuple[Dict[str, Tuple[int, int, str, bool]], Set[str], Set[str], Set[str], Set[str]]
+):
     number_words = {}
     # A set of words that can be used to start numeric expressions.
     valid_digit_words: Set[str] = set()
@@ -441,7 +471,6 @@ def from_words_to_digits_setup_once() -> Tuple[
 # Originally based on: https://ao.gl/how-to-convert-numeric-words-into-numbers-using-python/
 # A module like class can't be instanced.
 class from_words_to_digits:
-
     (
         _number_words,
         valid_digit_words,
@@ -559,9 +588,9 @@ class from_words_to_digits:
         valid_unit_words = from_words_to_digits.valid_unit_words
         number_words = from_words_to_digits._number_words
 
-        if not w_prev in valid_unit_words:
+        if w_prev not in valid_unit_words:
             return False
-        if not w in valid_unit_words:
+        if w not in valid_unit_words:
             return False
         increment_prev = number_words[w_prev][1]
         increment = number_words[w][1]
@@ -575,7 +604,6 @@ class from_words_to_digits:
         word_index: int,
         word_index_len: int,
     ) -> int:
-
         valid_unit_words = from_words_to_digits.valid_unit_words
         number_words = from_words_to_digits._number_words
 
@@ -602,12 +630,15 @@ class from_words_to_digits:
                         i_span_beg,  # Split start.
                         force_single_units=True,
                     )
-                    assert result_test[2] == i
-
-                    if result_prev:
-                        if len(result_prev[0]) == len(result_test[0]):
-                            return result_prev[2]
-
+                    # NOTE: in *almost* all cases this assertion is valid.
+                    # `assert i == result_test[2]`.
+                    # However these may not be equal if there are multiple disconnected series.
+                    # e.g. `twenty twenty and twenty twenty one` -> `2020 and 2021`, see: #92.
+                    assert i >= result_test[2]
+                    if result_test[2] == i:
+                        if result_prev:
+                            if len(result_prev[0]) == len(result_test[0]):
+                                return result_prev[2]
                     i_span_beg = i
                 w_prev = w
             i += 1
@@ -632,7 +663,6 @@ class from_words_to_digits:
         word_index: int,
         word_index_len: int,
     ) -> int:
-
         valid_unit_words = from_words_to_digits.valid_unit_words
         number_words = from_words_to_digits._number_words
         i = word_index
@@ -674,7 +704,6 @@ class from_words_to_digits:
         word_index: int,
         imply_single_unit: bool = False,
     ) -> Tuple[str, str, int, bool]:
-
         word_list_len = len(word_list)
 
         # Delimit, prevent accumulating "one hundred two hundred" -> "300" for example.
@@ -700,15 +729,22 @@ class from_words_to_digits:
     def parse_numbers_in_word_list(
         word_list: List[str],
         numbers_use_separator: bool = False,
+        numbers_min_value: Optional[int] = None,
+        numbers_no_suffix: bool = False,
     ) -> None:
         i = 0
         i_number_prev = -1
+        orig_word_list = word_list.copy()
         while i < len(word_list):
             if word_list[i] in from_words_to_digits.valid_digit_words:
                 number, suffix, i_next, allow_reformat = from_words_to_digits.parse_number(
                     word_list, i, imply_single_unit=True
                 )
                 if i != i_next:
+                    if numbers_no_suffix and suffix:
+                        i += 1
+                        continue
+
                     word_list[i:i_next] = [
                         ("{:,d}".format(int(number)) if (numbers_use_separator and allow_reformat) else number) + suffix
                     ]
@@ -753,6 +789,10 @@ class from_words_to_digits:
                         break
                 if i + 1 != j:
                     word_list[i:j] = ["".join(word_list[i:j])]
+                    orig_word_list[i:j] = ["".join(orig_word_list[i:j])]
+                if numbers_min_value is not None and int(word_list[i]) < numbers_min_value:
+                    word_list[i:j] = orig_word_list[i:j]
+
                 i = j
             else:
                 i += 1
@@ -764,7 +804,6 @@ class from_words_to_digits:
 
 
 def process_text_with_user_config(user_config: ModuleType, text: str) -> str:
-
     process_fn_name = "nerd_dictation_process"
     process_fn = getattr(user_config, process_fn_name)
     if process_fn is None:
@@ -790,6 +829,8 @@ def process_text(
     full_sentence: bool = False,
     numbers_as_digits: bool = False,
     numbers_use_separator: bool = False,
+    numbers_min_value: Optional[int] = None,
+    numbers_no_suffix: bool = False,
 ) -> str:
     """
     Basic post processing on text.
@@ -806,6 +847,8 @@ def process_text(
         from_words_to_digits.parse_numbers_in_word_list(
             words,
             numbers_use_separator=numbers_use_separator,
+            numbers_min_value=numbers_min_value,
+            numbers_no_suffix=numbers_no_suffix,
         )
 
     # Optional?
@@ -821,29 +864,12 @@ def process_text(
 #
 
 
-def text_from_vosk_pipe(
-    *,
-    vosk_model_dir: str,
-    exit_fn: Callable[..., int],
-    process_fn: Callable[[str], str],
-    handle_fn: Callable[[int, str], None],
-    timeout: float,
-    idle_time: float,
-    progressive: bool,
-    progressive_continuous: bool,
-    sample_rate: int,
+def recording_proc_with_non_blocking_stdout(
     input_method: str,
-    pulse_device_name: str = "",
-) -> bool:
-    # Delay some imports until recording has started to avoid minor delays.
-    import json
-
-    if not os.path.exists(vosk_model_dir):
-        sys.stderr.write(
-            "Please download the model from https://alphacephei.com/vosk/models and unpack it to %r.\n" % vosk_model_dir
-        )
-        sys.exit(1)
-
+    sample_rate: int,
+    pulse_device_name: str,
+    # NOTE: typed as a string for Py3.6 compatibility.
+) -> "Tuple[subprocess.Popen[bytes], IO[bytes]]":
     if input_method == "PAREC":
         cmd = (
             "parec",
@@ -875,27 +901,92 @@ def text_from_vosk_pipe(
             "-L",
             "-",
         )
+    elif input_method == "PW-CAT":
+        cmd = (
+            "pw-cat",
+            "--record",
+            "--format=s16",
+            "--rate",
+            str(sample_rate),
+            "--channels=1",
+            "-",
+        )
     else:
         sys.stderr.write("--input %r not supported.\n" % input_method)
         sys.exit(1)
 
     ps = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-
     stdout = ps.stdout
     assert stdout is not None
 
     # Needed so whatever is available can be read (without waiting).
     file_handle_make_non_blocking(stdout)
 
+    return ps, stdout
+
+
+def text_from_vosk_pipe(
+    *,
+    vosk_model_dir: str,
+    exit_fn: Callable[..., int],
+    process_fn: Callable[[str], str],
+    handle_fn: Callable[[int, str], None],
+    timeout: float,
+    idle_time: float,
+    progressive: bool,
+    progressive_continuous: bool,
+    sample_rate: int,
+    input_method: str,
+    pulse_device_name: str = "",
+    suspend_on_start: bool = False,
+    verbose: int = 0,
+    vosk_grammar_file: str = "",
+) -> bool:
+    # Delay some imports until recording has started to avoid minor delays.
+    import json
+
+    if not os.path.exists(vosk_model_dir):
+        sys.stderr.write(
+            "Please download the model from "
+            "https://alphacephei.com/vosk/models and unpack it to {!r}.\n".format(vosk_model_dir)
+        )
+        sys.exit(1)
+
+    # NOTE: typed as a string for Py3.6 compatibility.
+    def recording_proc_start() -> "Tuple[subprocess.Popen[bytes], IO[bytes]]":
+        return recording_proc_with_non_blocking_stdout(input_method, sample_rate, pulse_device_name)
+
+    has_ps = False
+    if not suspend_on_start:
+        ps, stdout = recording_proc_start()
+        has_ps = True
+
     # `mypy` doesn't know about VOSK.
     import vosk  # type: ignore
 
     vosk.SetLogLevel(-1)
 
+    if not vosk_grammar_file:
+        grammar_json = ""
+    else:
+        with open(vosk_grammar_file, encoding="utf-8") as fh:
+            grammar_json = fh.read()
+
+    # Allow for loading the model to take some time:
+    if verbose >= 1:
+        sys.stderr.write("Loading model...\n")
     model = vosk.Model(vosk_model_dir)
-    rec = vosk.KaldiRecognizer(model, sample_rate)
-    # 1mb (allow for loading the model to take some time).
-    block_size = 104_8576
+
+    if grammar_json == "":
+        rec = vosk.KaldiRecognizer(model, sample_rate)
+    else:
+        rec = vosk.KaldiRecognizer(model, sample_rate, grammar_json)
+
+    if verbose >= 1:
+        sys.stderr.write("Model loaded.\n")
+
+    # 1mb
+    block_size = 1_048_576
 
     use_timeout = timeout != 0.0
     if use_timeout:
@@ -904,7 +995,7 @@ def text_from_vosk_pipe(
 
     # Collect the output used when time-out is enabled.
     if not (progressive and progressive_continuous):
-        text_list = []
+        text_list: List[str] = []
 
     # Set true if handle has been called.
     handled_any = False
@@ -915,8 +1006,25 @@ def text_from_vosk_pipe(
     # Track this to prevent excessive load when the "partial" result doesn't change.
     json_text_partial_prev = ""
 
+    # -----------------------------
+    # Utilities for Text Processing
+
+    def handle_fn_suspended() -> None:
+        nonlocal handled_any
+        nonlocal text_prev
+        nonlocal json_text_partial_prev
+
+        handled_any = False
+        text_prev = ""
+        json_text_partial_prev = ""
+
+        if not (progressive and progressive_continuous):
+            text_list.clear()
+
     def handle_fn_wrapper(text: str, is_partial_arg: bool) -> None:
         nonlocal handled_any
+        nonlocal text_prev
+
         # Simple deferred text input, just accumulate values in a list (finish entering text on exit).
         if not progressive:
             if is_partial_arg:
@@ -926,7 +1034,6 @@ def text_from_vosk_pipe(
             return
 
         # Progressive support (type as you speak).
-        nonlocal text_prev
         if progressive_continuous:
             text_curr = process_fn(text)
         else:
@@ -952,11 +1059,132 @@ def text_from_vosk_pipe(
 
         handled_any = True
 
-    # Support setting up input simulation state.
-    handle_fn(SIMULATE_INPUT_CODE_COMMAND, "SETUP")
+    # -----------------------------------------------
+    # Utilities for accessing results on `rec` (VOSK)
+
+    def rec_handle_fn_wrapper_from_final_result() -> str:
+        json_text = rec.FinalResult()
+
+        # When `rec.FinalResult()` returns an empty string, typically immediately after a resume,
+        # it can cause the JSON decoder to fail. This patch simply ignores that case and continues
+        # by returning an empty string to the caller.
+        if not json_text:
+            return ""
+
+        assert isinstance(json_text, str)
+        json_data = json.loads(json_text)
+        text = json_data["text"]
+        assert isinstance(text, str)
+        if text:
+            handle_fn_wrapper(text, False)
+        return json_text
+
+    def rec_handle_fn_wrapper_from_partial_result(json_text_partial_prev: str) -> Tuple[str, str]:
+        json_text = rec.PartialResult()
+        # Without this, there are *many* calls with the same partial text.
+        if json_text_partial_prev != json_text:
+            json_text_partial_prev = json_text
+
+            json_data = json.loads(json_text)
+            # In rare cases this can be unset (when resuming from being suspended).
+            text = json_data.get("partial", "")
+            if text:
+                handle_fn_wrapper(text, True)
+        return json_text, json_text_partial_prev
+
+    if not suspend_on_start:
+        # Support setting up input simulation state.
+        handle_fn(SIMULATE_INPUT_CODE_COMMAND, "SETUP")
 
     # Use code to delay exiting, allowing reading the recording buffer to catch-up.
     code = 0
+
+    # ---------------
+    # Signal Handling
+
+    suspend = suspend_on_start
+
+    from types import FrameType
+
+    def do_suspend_pause() -> None:
+        nonlocal has_ps, ps, stdout
+        rec_handle_fn_wrapper_from_final_result()
+
+        # Don't include any of the current analysis when resuming.
+        rec.Reset()
+
+        # Clear the buffer:
+        handle_fn_suspended()
+
+        nonlocal verbose
+        if verbose >= 1:
+            sys.stderr.write("Recording suspended.\n")
+
+        # Close the recording process.
+        if has_ps:
+            # Support setting up input simulation state.
+            handle_fn(SIMULATE_INPUT_CODE_COMMAND, "TEARDOWN")
+
+            stdout.close()
+            os.kill(ps.pid, signal.SIGINT)
+            del stdout, ps
+            has_ps = False
+
+    # Warning: do not call do_suspend_resume() from a signal context because it
+    # can cause reentrant runtime errors and other related bugs.
+    def do_suspend_resume() -> None:
+        nonlocal has_ps, ps, stdout
+
+        # Resume reading from the recording process.
+        nonlocal verbose
+        if verbose >= 1:
+            sys.stderr.write("Recording.\n")
+
+        handle_fn(SIMULATE_INPUT_CODE_COMMAND, "SETUP")
+        ps, stdout = recording_proc_start()
+        has_ps = True
+
+    def handle_sig_suspend_from_usr1(_signum: int, _frame: Optional[FrameType]) -> None:
+        nonlocal suspend
+        if suspend:
+            return
+        suspend = True
+        do_suspend_pause()
+        # Use when Py3.6 compatibility is dropped.
+        # `signal.raise_signal(signal.SIGSTOP)`
+        os.kill(os.getpid(), signal.SIGSTOP)
+
+    def handle_sig_resume_from_cont(_signum: int, _frame: Optional[FrameType]) -> None:
+        nonlocal suspend
+        if not suspend:
+            return
+        suspend = False
+
+    def handle_sig_reload_from_hup(_signum: int, _frame: Optional[FrameType]) -> None:
+        if verbose >= 1:
+            sys.stderr.write("Reload.\n")
+        process_fn("")
+
+    import signal
+
+    # Suspend resume from separate signals.
+    signal.signal(signal.SIGUSR1, handle_sig_suspend_from_usr1)
+
+    # This allows you to stop via ctrl+z and resume with `fg` at a terminal.
+    # This intentionally re-uses the handle_sig_suspend_from_usr1 handler:
+    signal.signal(signal.SIGTSTP, handle_sig_suspend_from_usr1)
+
+    signal.signal(signal.SIGCONT, handle_sig_resume_from_cont)
+
+    signal.signal(signal.SIGHUP, handle_sig_reload_from_hup)
+
+    if suspend:
+        # Use when Py3.6 compatibility is dropped.
+        # `signal.raise_signal(signal.SIGSTOP)`
+        os.kill(os.getpid(), signal.SIGSTOP)
+
+    # ---------
+    # Main Loop
 
     if idle_time > 0.0:
         idle_time_prev = time.time()
@@ -964,6 +1192,13 @@ def text_from_vosk_pipe(
     while code == 0:
         # -1=cancel, 0=continue, 1=finish.
         code = exit_fn(handled_any)
+
+        # Note that when suspend is enabled the entire process is suspended
+        # and this look should not run.
+        # This check is simply done to prevent any logic running before the process is actually suspended,
+        # although in practice it doesn't look to be a problem.
+        if suspend:
+            continue
 
         if idle_time > 0.0:
             # Subtract processing time from the previous loop.
@@ -979,31 +1214,23 @@ def text_from_vosk_pipe(
 
         # Mostly the data read is quite small (under 1k).
         # Only the 1st entry in the loop reads a lot of data due to the time it takes to initialize the VOSK module.
-        data = stdout.read(block_size)
+        try:
+            data = stdout.read(block_size)
+        except (NameError, ValueError):
+            # Start recording if `stdout` is not yet open (NameError), or if it
+            # was closed via suspend (ValueError).  This can happen either due
+            # to a suspend/resume cycle (SIGUSR1/SIGTSTP->SIGCONT) or when
+            # --suspend-on-start was specified followed by a SIGCONT.
+            do_suspend_resume()
+            continue
 
         if data:
             ok = rec.AcceptWaveform(data)
-
             if ok:
-                json_text = rec.Result()
                 json_text_partial_prev = ""
-                json_data = json.loads(json_text)
-                text = json_data["text"]
-                assert isinstance(text, str)
-                if text:
-                    handle_fn_wrapper(text, False)
+                json_text = rec_handle_fn_wrapper_from_final_result()
             else:
-                # Only for comparison, to detect change.
-                # if use_timeout:
-                json_text = rec.PartialResult()
-                # Without this, there are *many* calls with the same partial text.
-                if json_text_partial_prev != json_text:
-                    json_text_partial_prev = json_text
-
-                    json_data = json.loads(json_text)
-                    text = json_data["partial"]
-                    if text:
-                        handle_fn_wrapper(text, True)
+                json_text, json_text_partial_prev = rec_handle_fn_wrapper_from_partial_result(json_text_partial_prev)
 
             # Monitor the partial output.
             # Finish if no changes are made for `timeout` seconds.
@@ -1016,24 +1243,21 @@ def text_from_vosk_pipe(
                         code = 1  # The time was exceeded, exit!
 
     # Close the recording process.
-    import signal
+    if has_ps:
+        # stdout.close(), no need, this is exiting.
+        os.kill(ps.pid, signal.SIGINT)
+        del ps, stdout
+        has_ps = False
 
-    os.kill(ps.pid, signal.SIGINT)
-
-    # Support setting up input simulation state.
-    handle_fn(SIMULATE_INPUT_CODE_COMMAND, "TEARDOWN")
+        # Support setting up input simulation state.
+        handle_fn(SIMULATE_INPUT_CODE_COMMAND, "TEARDOWN")
 
     if code == -1:
         sys.stderr.write("Text input canceled!\n")
         sys.exit(0)
 
     # This writes many JSON blocks, use the last one.
-    json_text = rec.FinalResult()
-    json_data = json.loads(json_text)
-    text = json_data["text"]
-    assert isinstance(text, str)
-    if text:
-        handle_fn_wrapper(text, False)
+    rec_handle_fn_wrapper_from_final_result()
 
     if not progressive:
         # We never arrive here needing deletions
@@ -1054,6 +1278,8 @@ def main_begin(
     full_sentence: bool = False,
     numbers_as_digits: bool = False,
     numbers_use_separator: bool = False,
+    numbers_min_value: Optional[int] = None,
+    numbers_no_suffix: bool = False,
     timeout: float = 0.0,
     idle_time: float = 0.0,
     delay_exit: float = 0.0,
@@ -1061,6 +1287,9 @@ def main_begin(
     config_override: Optional[str],
     output: str = "TYPE",
     simulate_input_tool: str = "XDOTOOL",
+    suspend_on_start: bool = False,
+    verbose: int = 0,
+    vosk_grammar_file: str = "",
 ) -> None:
     """
     Initialize audio recording, then full text to speech conversion can take place.
@@ -1091,6 +1320,10 @@ def main_begin(
         is_run_on = age_in_seconds is not None and (age_in_seconds < punctuate_from_previous_timeout)
         del age_in_seconds
 
+    # Write the PID, needed for suspend/resume sub-commands to know the PID of the current process.
+    with open(path_to_cookie, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+
     # Force zero time-stamp so a fast begin/end (tap) action
     # doesn't leave dictation running.
     touch(path_to_cookie, mtime=0)
@@ -1114,7 +1347,6 @@ def main_begin(
         if not os.path.exists(path_to_cookie):
             return -1  # Cancel.
         if file_mtime_or_none(path_to_cookie) != cookie_timestamp:
-
             # Only delay exit if some text has been handled,
             # this prevents accidental tapping of push to talk from running.
             if handled_any:
@@ -1139,14 +1371,13 @@ def main_begin(
         #
         # Load the user configuration (when found).
         #
-        if process_fn_is_first:
-            user_config = user_config_as_module_or_none(config_override=config_override)
+        # text=="" indicates that user_config should be reloaded (SIGHUP)
+        #
+        if process_fn_is_first or text == "":
+            user_config = user_config_as_module_or_none(config_override=config_override, user_config_prev=user_config)
 
-        #
-        # User text post processing (when found).
-        #
-        if user_config is not None:
-            text = process_text_with_user_config(user_config, text)
+        if not text:
+            return ""
 
         #
         # Simple text post processing and capitalization.
@@ -1156,7 +1387,15 @@ def main_begin(
             full_sentence=full_sentence,
             numbers_as_digits=numbers_as_digits,
             numbers_use_separator=numbers_use_separator,
+            numbers_min_value=numbers_min_value,
+            numbers_no_suffix=numbers_no_suffix,
         )
+
+        #
+        # User text post processing (when found).
+        #
+        if user_config is not None:
+            text = process_text_with_user_config(user_config, text)
 
         if is_run_on:
             # This is a signal that the end of the sentence has been reached.
@@ -1173,15 +1412,18 @@ def main_begin(
     # Handled the resulting text
     #
     if output == "SIMULATE_INPUT":
-
         if simulate_input_tool == "XDOTOOL":
             handle_fn = simulate_typing_with_xdotool
         elif simulate_input_tool == "YDOTOOL":
             handle_fn = simulate_typing_with_ydotool
         elif simulate_input_tool == "DOTOOL":
             handle_fn = simulate_typing_with_dotool
+        elif simulate_input_tool == "DOTOOLC":
+            handle_fn = simulate_typing_with_dotoolc
         elif simulate_input_tool == "WTYPE":
             handle_fn = simulate_typing_with_wtype
+        elif simulate_input_tool == "STDOUT":
+            handle_fn = simulate_typing_with_stout
         else:
             raise Exception("Internal error, unknown input tool: {!r}".format(simulate_input_tool))
 
@@ -1212,6 +1454,9 @@ def main_begin(
         exit_fn=exit_fn,
         process_fn=process_fn,
         handle_fn=handle_fn,
+        suspend_on_start=suspend_on_start,
+        verbose=verbose,
+        vosk_grammar_file=vosk_grammar_file,
     )
 
     if not found_any:
@@ -1228,6 +1473,9 @@ def main_end(
     if not path_to_cookie:
         path_to_cookie = os.path.join(tempfile.gettempdir(), TEMP_COOKIE_NAME)
 
+    # Resume (does nothing if not suspended), so suspending doesn't prevent the cancel operation.
+    main_suspend(path_to_cookie=path_to_cookie, suspend=False, verbose=0)
+
     touch(path_to_cookie)
 
 
@@ -1238,7 +1486,41 @@ def main_cancel(
     if not path_to_cookie:
         path_to_cookie = os.path.join(tempfile.gettempdir(), TEMP_COOKIE_NAME)
 
+    # Resume (does nothing if not suspended), so suspending doesn't prevent the cancel operation.
+    main_suspend(path_to_cookie=path_to_cookie, suspend=False, verbose=0)
+
     file_remove_if_exists(path_to_cookie)
+
+
+def main_suspend(
+    *,
+    path_to_cookie: str = "",
+    suspend: bool,
+    verbose: int,
+) -> None:
+    import signal
+
+    if not path_to_cookie:
+        path_to_cookie = os.path.join(tempfile.gettempdir(), TEMP_COOKIE_NAME)
+
+    if not os.path.exists(path_to_cookie):
+        if verbose >= 1:
+            sys.stderr.write("No running nerd-dictation cookie found at: {:s}, abort!\n".format(path_to_cookie))
+        return
+
+    with open(path_to_cookie, "r", encoding="utf-8") as fh:
+        data = fh.read()
+    try:
+        pid = int(data)
+    except Exception as ex:
+        if verbose >= 1:
+            sys.stderr.write("Failed to read PID with error {!r}, abort!\n".format(ex))
+        return
+
+    if suspend:
+        os.kill(pid, signal.SIGUSR1)
+    else:  # Resume.
+        os.kill(pid, signal.SIGCONT)
 
 
 def argparse_generic_command_cookie(subparse: argparse.ArgumentParser) -> None:
@@ -1253,7 +1535,7 @@ def argparse_generic_command_cookie(subparse: argparse.ArgumentParser) -> None:
     )
 
 
-def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
+def argparse_create_begin(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     subparse = subparsers.add_parser(
         "begin",
         help="Begin dictation.",
@@ -1286,6 +1568,20 @@ def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
         type=str,
         metavar="DIR",
         help=("Path to the VOSK model, see: https://alphacephei.com/vosk/models"),
+        required=False,
+    )
+
+    subparse.add_argument(
+        "--vosk-grammar-file",
+        default=None,
+        dest="vosk_grammar_file",
+        type=str,
+        metavar="DIR",
+        help=(
+            "Path to a JSON grammar file.  This restricts the phrases recognized by VOSK for\n"
+            "better accuracy.  See `vosk_recognizer_new_grm` in the API reference:\n"
+            "https://github.com/alphacep/vosk-api/blob/master/src/vosk_api.h"
+        ),
         required=False,
     )
 
@@ -1374,9 +1670,22 @@ def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
         type=float,
         metavar="SECONDS",
         help=(
-            "The time to continue running after an exit request.\n"
+            "The time to continue running after an end request.\n"
             'this can be useful so "push to talk" setups can be released while you finish speaking\n'
             "(zero disables)."
+        ),
+        required=False,
+    )
+
+    subparse.add_argument(
+        "--suspend-on-start",
+        dest="suspend_on_start",
+        default=False,
+        action="store_true",
+        help=(
+            "Start the process and immediately suspend.\n"
+            "Intended for use when nerd-dictation is kept open\n"
+            "where resume/suspend is used for dictation instead of begin/end."
         ),
         required=False,
     )
@@ -1427,19 +1736,45 @@ def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
     )
 
     subparse.add_argument(
+        "--numbers-min-value",
+        dest="numbers_min_value",
+        default=None,
+        type=int,
+        help=(
+            "Minimum value for numbers to convert from whole words to digits.\n"
+            'This provides for more formal writing and prevents terms like "no one"\n'
+            'from being turned into "no 1".'
+        ),
+        required=False,
+    )
+
+    subparse.add_argument(
+        "--numbers-no-suffix",
+        dest="numbers_no_suffix",
+        default=False,
+        action="store_true",
+        help=(
+            "Suppress number suffixes when --numbers-as-digits is specified.\n"
+            'For example, this will prevent "first" from becoming "1st".'
+        ),
+        required=False,
+    )
+
+    subparse.add_argument(
         "--input",
         dest="input_method",
         default="PAREC",
         type=str,
         metavar="INPUT_METHOD",
-        choices=("PAREC", "SOX"),
+        choices=("PAREC", "SOX", "PW-CAT"),
         help=(
-            "Specify input method to be used for audio recording. Valid methods: PAREC, SOX\n"
+            "Specify input method to be used for audio recording. Valid methods: PAREC, SOX, PW-CAT.\n"
             "\n"
             "- ``PAREC`` (external command, default)\n"
             "  See --pulse-device-name option to use a specific pulse-audio device.\n"
             "- ``SOX`` (external command)\n"
             "  For help on setting up sox, see ``readme-sox.rst`` in the nerd-dictation repository.\n"
+            "- ``PW-CAT`` (external command)\n"
         ),
         required=False,
     )
@@ -1464,19 +1799,36 @@ def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
         "--simulate-input-tool",
         dest="simulate_input_tool",
         default="XDOTOOL",
-        choices=("XDOTOOL", "DOTOOL", "YDOTOOL", "WTYPE"),
+        choices=("XDOTOOL", "DOTOOL", "DOTOOLC", "YDOTOOL", "WTYPE", "STDOUT"),
         metavar="SIMULATE_INPUT_TOOL",
         help=(
             "Program used to simulate keystrokes (default).\n"
             "\n"
             "- ``XDOTOOL`` Compatible with the X server only (default).\n"
             "- ``DOTOOL`` Compatible with all Linux distributions and Wayland.\n"
+            "- ``DOTOOLC`` Same as DOTOOL but for use with the `dotoold` daemon.\n"
             "- ``YDOTOOL`` Compatible with all Linux distributions and Wayland but requires some setup.\n"
             "- ``WTYPE`` Compatible with Wayland.\n"
+            "- ``STDOUT`` Bare stdout with Ctrl-H for backspaces.\n"
             "  For help on setting up ydotool, see ``readme-ydotool.rst`` in the nerd-dictation repository.\n"
         ),
         required=False,
     )
+
+    subparse.add_argument(
+        "--verbose",
+        dest="verbose",
+        default=0,
+        type=int,
+        help=(
+            "Verbosity level, defaults to zero (no output except for errors)\n"
+            "\n"
+            "- Level 1: report top level actions (dictation started, suspended .. etc).\n"
+            "- Level 2: report internal details (may be noisy)."
+        ),
+        required=False,
+    )
+
     subparse.add_argument(
         "-",
         dest="rest",
@@ -1500,6 +1852,8 @@ def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
             full_sentence=args.full_sentence,
             numbers_as_digits=args.numbers_as_digits,
             numbers_use_separator=args.numbers_use_separator,
+            numbers_min_value=args.numbers_min_value,
+            numbers_no_suffix=args.numbers_no_suffix,
             timeout=args.timeout,
             idle_time=min(args.idle_time, 0.5),
             delay_exit=args.delay_exit,
@@ -1507,11 +1861,14 @@ def argparse_create_begin(subparsers: argparse._SubParsersAction) -> None:
             config_override=args.config,
             output=args.output,
             simulate_input_tool=args.simulate_input_tool,
+            suspend_on_start=args.suspend_on_start,
+            verbose=args.verbose,
+            vosk_grammar_file=args.vosk_grammar_file,
         ),
     )
 
 
-def argparse_create_end(subparsers: argparse._SubParsersAction) -> None:
+def argparse_create_end(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     subparse = subparsers.add_parser(
         "end",
         help="End dictation.",
@@ -1530,7 +1887,7 @@ This ends dictation, causing the text to be typed in.
     )
 
 
-def argparse_create_cancel(subparsers: argparse._SubParsersAction) -> None:
+def argparse_create_cancel(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     subparse = subparsers.add_parser(
         "cancel",
         help="Cancel dictation.",
@@ -1547,14 +1904,66 @@ def argparse_create_cancel(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def argparse_create_suspend(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    subparse = subparsers.add_parser(
+        "suspend",
+        help="Suspend the dictation process.",
+        description=(
+            "Suspend recording audio & the dictation process.\n"
+            "\n"
+            "This is useful on slower systems or when large language models take longer to load.\n"
+            "Recording audio is stopped and the process is paused to remove any CPU overhead."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+
+    argparse_generic_command_cookie(subparse)
+
+    subparse.set_defaults(
+        func=lambda args: main_suspend(
+            path_to_cookie=args.path_to_cookie,
+            suspend=True,
+            verbose=1,
+        ),
+    )
+
+
+def argparse_create_resume(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    subparse = subparsers.add_parser(
+        "resume",
+        help="Resume the dictation process.",
+        description=(
+            "Resume recording audio & the dictation process.\n"
+            "\n"
+            "This is to be used to resume after the 'suspend' command.\n"
+            "When nerd-dictation is not suspended, this does nothing.\n"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+
+    argparse_generic_command_cookie(subparse)
+
+    subparse.set_defaults(
+        func=lambda args: main_suspend(
+            path_to_cookie=args.path_to_cookie,
+            suspend=False,
+            verbose=1,
+        ),
+    )
+
+
 def argparse_create() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
 
     subparsers = parser.add_subparsers()
 
     argparse_create_begin(subparsers)
+
     argparse_create_end(subparsers)
     argparse_create_cancel(subparsers)
+
+    argparse_create_suspend(subparsers)
+    argparse_create_resume(subparsers)
 
     return parser
 
